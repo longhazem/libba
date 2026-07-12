@@ -11,9 +11,9 @@ local Mouse = LocalPlayer:GetMouse();
 local ScreenGui = Instance.new('ScreenGui');
 ScreenGui.ResetOnSpawn = false;
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Global;
-ScreenGui.DisplayOrder = 999;
+ScreenGui.DisplayOrder = 100;
 
--- Parent logic y như Rayfield — gethui → syn.protect_gui → RobloxGui → CoreGui
+-- Exact same priority chain as Rayfield
 if gethui then
     ScreenGui.Parent = gethui()
 elseif syn and syn.protect_gui then
@@ -131,10 +131,14 @@ function Library:Create(Class, Properties)
 
     if type(Class) == 'string' then
         _Instance = Instance.new(Class);
+        -- Roblox maps Touch→MouseButton1 only when Active=true (Rayfield relies on this)
+        if Class == 'TextButton' or Class == 'ImageButton' then
+            _Instance.Active = true;
+        end
     end;
 
     for Property, Value in next, Properties do
-        _Instance[Property] = Value;
+        pcall(function() _Instance[Property] = Value end);
     end;
 
     return _Instance;
@@ -158,22 +162,22 @@ end;
 
 local TweenService = game:GetService('TweenService');
 
-function Library:MakeDraggable(Frame, Cutoff)
-    Frame.Active = true;
+-- Exact Rayfield drag pattern: Input.Position delta + TweenService smooth
+function Library:MakeDraggable(DragPoint, Main, Cutoff)
+    Main = Main or DragPoint;
     pcall(function()
         local Dragging, DragInput, MousePos, FramePos = false, nil, nil, nil;
+        DragPoint.Active = true;
 
-        Frame.InputBegan:Connect(function(Input)
-            if Library.UILocked then return end
-            if Input.UserInputType == Enum.UserInputType.MouseButton1
-            or Input.UserInputType == Enum.UserInputType.Touch then
-                -- Cutoff: only drag from top bar area
-                local relY = Input.Position.Y - Frame.AbsolutePosition.Y
-                if relY > (Cutoff or 40) then return end
+        DragPoint.InputBegan:Connect(function(Input)
+            if Input.UserInputType == Enum.UserInputType.MouseButton1 then
+                -- Cutoff: only drag from top area
+                local relY = Input.Position.Y - DragPoint.AbsolutePosition.Y;
+                if relY > (Cutoff or 50) then return end;
 
                 Dragging = true;
                 MousePos = Input.Position;
-                FramePos = Frame.Position;
+                FramePos = Main.Position;
 
                 Input.Changed:Connect(function()
                     if Input.UserInputState == Enum.UserInputState.End then
@@ -183,9 +187,8 @@ function Library:MakeDraggable(Frame, Cutoff)
             end
         end)
 
-        Frame.InputChanged:Connect(function(Input)
-            if Input.UserInputType == Enum.UserInputType.MouseMovement
-            or Input.UserInputType == Enum.UserInputType.Touch then
+        DragPoint.InputChanged:Connect(function(Input)
+            if Input.UserInputType == Enum.UserInputType.MouseMovement then
                 DragInput = Input;
             end
         end)
@@ -193,7 +196,7 @@ function Library:MakeDraggable(Frame, Cutoff)
         InputService.InputChanged:Connect(function(Input)
             if Input == DragInput and Dragging then
                 local Delta = Input.Position - MousePos;
-                TweenService:Create(Frame, TweenInfo.new(0.13, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+                TweenService:Create(Main, TweenInfo.new(0.45, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
                     Position = UDim2.new(
                         FramePos.X.Scale, FramePos.X.Offset + Delta.X,
                         FramePos.Y.Scale, FramePos.Y.Offset + Delta.Y
@@ -3461,13 +3464,13 @@ function Library:CreateWindow(...)
         Size = UDim2.new(0, 0, 0, 0);
         Visible = true;
         Text = '';
-        Modal = false;
+        Modal = false; -- never true: Modal kills touch on mobile
         Parent = ScreenGui;
     });
 
     function Library.Toggle()
         Outer.Visible = not Outer.Visible;
-        ModalElement.Modal = Outer.Visible;
+        -- ModalElement.Modal intentionally never set: kills mobile touch
 
         local oIcon = Mouse.Icon;
         local State = InputService.MouseIconEnabled;
@@ -3523,140 +3526,89 @@ end;
 Players.PlayerAdded:Connect(OnPlayerChange);
 Players.PlayerRemoving:Connect(OnPlayerChange);
 
--- ── FLOATING BUTTONS ─────────────────────────────────────────────────────────
--- 2 nút riêng biệt, kéo được, không nằm trong UI chính
--- Nút 1: Toggle UI (bật/tắt cửa sổ chính)
--- Nút 2: Lock UI (khóa vị trí cửa sổ, không kéo được)
+-- ── FLOATING BUTTONS ──────────────────────────────────────────────────────
+-- 2 nút kéo được, riêng biệt, không nằm trong UI chính
+-- Roblox maps Touch→MouseButton1 when Active=true (same as Rayfield)
 do
-    local UIS = InputService
-    local RS  = RunService
-
     local BtnGui = Instance.new('ScreenGui')
     BtnGui.Name = 'TokaiHubButtons'
     BtnGui.ResetOnSpawn = false
+    BtnGui.DisplayOrder = 101
     BtnGui.ZIndexBehavior = Enum.ZIndexBehavior.Global
-    BtnGui.DisplayOrder = 999
-    pcall(function() BtnGui.Parent = CoreGui end)
-    if BtnGui.Parent ~= CoreGui then
-        BtnGui.Parent = LocalPlayer:WaitForChild('PlayerGui')
+    if gethui then BtnGui.Parent = gethui()
+    elseif syn and syn.protect_gui then syn.protect_gui(BtnGui); BtnGui.Parent = CoreGui
+    elseif CoreGui:FindFirstChild("RobloxGui") then BtnGui.Parent = CoreGui:FindFirstChild("RobloxGui")
+    else BtnGui.Parent = CoreGui end
+
+    local function MakeFloatBtn(label, color, posX, posY)
+        local f = Instance.new('TextButton')
+        f.Name = label
+        f.Size = UDim2.fromOffset(52, 26)
+        f.Position = UDim2.fromOffset(posX, posY)
+        f.BackgroundColor3 = color
+        f.BorderSizePixel = 0
+        f.Text = label
+        f.TextColor3 = Color3.new(1,1,1)
+        f.TextSize = 11
+        f.Font = Enum.Font.GothamBold
+        f.ZIndex = 10
+        f.Active = true  -- Touch→MouseButton1 on mobile
+        f.Parent = BtnGui
+        Instance.new('UICorner', f).CornerRadius = UDim.new(0,6)
+        local s = Instance.new('UIStroke', f)
+        s.Color = Color3.new(1,1,1); s.Transparency = 0.8; s.Thickness = 1
+        return f
     end
 
-    local function MakeButton(label, color, posX, posY)
-        local frame = Instance.new('Frame')
-        frame.Size = UDim2.fromOffset(54, 28)
-        frame.Position = UDim2.fromOffset(posX, posY)
-        frame.BackgroundColor3 = color
-        frame.BorderSizePixel = 0
-        frame.Active = true
-        frame.ZIndex = 100
-        frame.Parent = BtnGui
+    local toggleBtn = MakeFloatBtn('≡ UI', Color3.fromRGB(0,85,255), 20, 20)
+    local lockBtn   = MakeFloatBtn('🔒', Color3.fromRGB(50,50,50), 78, 20)
 
-        local corner = Instance.new('UICorner')
-        corner.CornerRadius = UDim.new(0, 6)
-        corner.Parent = frame
-
-        local stroke = Instance.new('UIStroke')
-        stroke.Color = Color3.fromRGB(255, 255, 255)
-        stroke.Transparency = 0.85
-        stroke.Thickness = 1
-        stroke.Parent = frame
-
-        local txt = Instance.new('TextLabel')
-        txt.Size = UDim2.fromScale(1, 1)
-        txt.BackgroundTransparency = 1
-        txt.Text = label
-        txt.TextColor3 = Color3.new(1, 1, 1)
-        txt.TextSize = 12
-        txt.Font = Enum.Font.GothamBold
-        txt.ZIndex = 101
-        txt.Parent = frame
-
-        return frame
-    end
-
-    local toggleBtn = MakeButton('≡ UI', Color3.fromRGB(0, 85, 255), 20, 20)
-    local lockBtn   = MakeButton('🔒 Lock', Color3.fromRGB(50, 50, 50), 80, 20)
-
-    local UILocked = false
-
-    -- Make a frame draggable
-    local function MakeDraggableBtn(frame)
+    -- Rayfield drag pattern on floating buttons
+    local function DragBtn(btn)
         pcall(function()
             local Dragging, DragInput, MousePos, FramePos = false, nil, nil, nil
-            frame.InputBegan:Connect(function(Input)
-                if Input.UserInputType == Enum.UserInputType.MouseButton1
-                or Input.UserInputType == Enum.UserInputType.Touch then
-                    Dragging  = true
-                    MousePos  = Input.Position
-                    FramePos  = frame.Position
+            btn.InputBegan:Connect(function(Input)
+                if Input.UserInputType == Enum.UserInputType.MouseButton1 then
+                    Dragging = true
+                    MousePos = Input.Position
+                    FramePos = btn.Position
                     Input.Changed:Connect(function()
-                        if Input.UserInputState == Enum.UserInputState.End then
-                            Dragging = false
-                        end
+                        if Input.UserInputState == Enum.UserInputState.End then Dragging = false end
                     end)
                 end
             end)
-            frame.InputChanged:Connect(function(Input)
-                if Input.UserInputType == Enum.UserInputType.MouseMovement
-                or Input.UserInputType == Enum.UserInputType.Touch then
-                    DragInput = Input
-                end
+            btn.InputChanged:Connect(function(Input)
+                if Input.UserInputType == Enum.UserInputType.MouseMovement then DragInput = Input end
             end)
-            UIS.InputChanged:Connect(function(Input)
+            game:GetService('UserInputService').InputChanged:Connect(function(Input)
                 if Input == DragInput and Dragging then
-                    local Delta = Input.Position - MousePos
-                    frame.Position = UDim2.new(
-                        FramePos.X.Scale, FramePos.X.Offset + Delta.X,
-                        FramePos.Y.Scale, FramePos.Y.Offset + Delta.Y
-                    )
-                    -- Sync lockBtn to follow toggleBtn
+                    local D = Input.Position - MousePos
+                    btn.Position = UDim2.new(FramePos.X.Scale, FramePos.X.Offset+D.X, FramePos.Y.Scale, FramePos.Y.Offset+D.Y)
                 end
             end)
         end)
     end
 
-    MakeDraggableBtn(toggleBtn)
-    MakeDraggableBtn(lockBtn)
-
-    -- Keep lock button 4px to the right of toggle button
-    RS.RenderStepped:Connect(function()
+    DragBtn(toggleBtn)
+    -- Lock button follows toggle button
+    game:GetService('RunService').RenderStepped:Connect(function()
         lockBtn.Position = UDim2.fromOffset(
-            toggleBtn.Position.X.Offset + toggleBtn.Size.X.Offset + 4,
-            toggleBtn.Position.Y.Offset
-        )
+            toggleBtn.Position.X.Offset + 56,
+            toggleBtn.Position.Y.Offset)
     end)
 
-    -- Toggle UI button: click to show/hide main window
-    toggleBtn.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1
-        or input.UserInputType == Enum.UserInputType.Touch then
-            task.delay(0, function()
-                Library.Toggle()
-            end)
-        end
+    local UILocked = false
+    toggleBtn.MouseButton1Click:Connect(function()
+        Library.Toggle()
     end)
-
-    -- Lock UI button: lock/unlock main window dragging
-    lockBtn.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1
-        or input.UserInputType == Enum.UserInputType.Touch then
-            task.delay(0, function()
-                UILocked = not UILocked
-                if UILocked then
-                    lockBtn.BackgroundColor3 = Color3.fromRGB(200, 60, 60)
-                    lockBtn:FindFirstChildOfClass('TextLabel').Text = '🔒 Lock'
-                    -- Disable dragging on main window by overriding MakeDraggable
-                    Library.UILocked = true
-                else
-                    lockBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
-                    lockBtn:FindFirstChildOfClass('TextLabel').Text = '🔓 Free'
-                    Library.UILocked = false
-                end
-            end)
-        end
+    lockBtn.MouseButton1Click:Connect(function()
+        UILocked = not UILocked
+        Library.UILocked = UILocked
+        lockBtn.Text = UILocked and '🔒' or '🔓'
+        lockBtn.BackgroundColor3 = UILocked and Color3.fromRGB(200,60,60) or Color3.fromRGB(50,50,50)
     end)
 end
--- ─────────────────────────────────────────────────────────────────────────────
+-- ───────────────────────────────────────────────────────────────────────────
 
 getgenv().Library = Library
 return Library
