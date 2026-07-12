@@ -6,36 +6,23 @@ local Players = game:GetService('Players');
 local RunService = game:GetService('RunService')
 local RenderStepped = RunService.RenderStepped;
 local LocalPlayer = Players.LocalPlayer;
--- Mouse compat: GetMouse() is deprecated and broken on mobile executors
--- Use UserInputService:GetMouseLocation() which works on all platforms
-local _MouseObj = LocalPlayer:GetMouse();
-local Mouse = setmetatable({}, {
-    __index = function(_, k)
-        if k == 'X' then
-            return InputService:GetMouseLocation().X
-        elseif k == 'Y' then
-            return InputService:GetMouseLocation().Y
-        else
-            return _MouseObj[k]
-        end
-    end
-});
-
--- Executor compat: protectgui varies by executor
-local ProtectGui = protectgui or (syn and syn.protect_gui) or (gethui and function(g) g.Parent = gethui() end) or nil
+local Mouse = LocalPlayer:GetMouse();
 
 local ScreenGui = Instance.new('ScreenGui');
 ScreenGui.ResetOnSpawn = false;
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Global;
+ScreenGui.DisplayOrder = 999;
 
--- Parent to CoreGui with protectgui if available, else PlayerGui
--- CoreGui blocks input on Delta, Wave, and most mobile executors without protectgui
-if ProtectGui then
-    pcall(ProtectGui, ScreenGui)
-    pcall(function() ScreenGui.Parent = CoreGui end)
-end
-if not ScreenGui.Parent or ScreenGui.Parent ~= CoreGui then
-    ScreenGui.Parent = LocalPlayer:WaitForChild('PlayerGui')
+-- Parent logic y như Rayfield — gethui → syn.protect_gui → RobloxGui → CoreGui
+if gethui then
+    ScreenGui.Parent = gethui()
+elseif syn and syn.protect_gui then
+    syn.protect_gui(ScreenGui)
+    ScreenGui.Parent = CoreGui
+elseif CoreGui:FindFirstChild("RobloxGui") then
+    ScreenGui.Parent = CoreGui:FindFirstChild("RobloxGui")
+else
+    ScreenGui.Parent = CoreGui
 end
 
 local Toggles = {};
@@ -169,31 +156,51 @@ function Library:CreateLabel(Properties, IsHud)
     return Library:Create(_Instance, Properties);
 end;
 
-function Library:MakeDraggable(Instance, Cutoff)
-    Instance.Active = true;
+local TweenService = game:GetService('TweenService');
 
-   Instance.InputBegan:Connect(function(Input)
-        if Input.UserInputType == Enum.UserInputType.MouseButton1 then
-            local ObjPos = Vector2.new(
-                Mouse.X - Instance.AbsolutePosition.X,
-                Mouse.Y - Instance.AbsolutePosition.Y
-            );
+function Library:MakeDraggable(Frame, Cutoff)
+    Frame.Active = true;
+    pcall(function()
+        local Dragging, DragInput, MousePos, FramePos = false, nil, nil, nil;
 
-            if ObjPos.Y > (Cutoff or 40) then
-                return;
-            end;
+        Frame.InputBegan:Connect(function(Input)
+            if Library.UILocked then return end
+            if Input.UserInputType == Enum.UserInputType.MouseButton1
+            or Input.UserInputType == Enum.UserInputType.Touch then
+                -- Cutoff: only drag from top bar area
+                local relY = Input.Position.Y - Frame.AbsolutePosition.Y
+                if relY > (Cutoff or 40) then return end
 
-            while InputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) do
-                Instance.Position = UDim2.new(
-                    0,
-                    Mouse.X - ObjPos.X + (Instance.Size.X.Offset * Instance.AnchorPoint.X),
-                    0,
-                    Mouse.Y - ObjPos.Y + (Instance.Size.Y.Offset * Instance.AnchorPoint.Y)
-                );
+                Dragging = true;
+                MousePos = Input.Position;
+                FramePos = Frame.Position;
 
-                RenderStepped:Wait();
-            end;
-        end;
+                Input.Changed:Connect(function()
+                    if Input.UserInputState == Enum.UserInputState.End then
+                        Dragging = false;
+                    end
+                end)
+            end
+        end)
+
+        Frame.InputChanged:Connect(function(Input)
+            if Input.UserInputType == Enum.UserInputType.MouseMovement
+            or Input.UserInputType == Enum.UserInputType.Touch then
+                DragInput = Input;
+            end
+        end)
+
+        InputService.InputChanged:Connect(function(Input)
+            if Input == DragInput and Dragging then
+                local Delta = Input.Position - MousePos;
+                TweenService:Create(Frame, TweenInfo.new(0.13, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+                    Position = UDim2.new(
+                        FramePos.X.Scale, FramePos.X.Offset + Delta.X,
+                        FramePos.Y.Scale, FramePos.Y.Offset + Delta.Y
+                    )
+                }):Play()
+            end
+        end)
     end)
 end;
 
@@ -3515,6 +3522,141 @@ end;
 
 Players.PlayerAdded:Connect(OnPlayerChange);
 Players.PlayerRemoving:Connect(OnPlayerChange);
+
+-- ── FLOATING BUTTONS ─────────────────────────────────────────────────────────
+-- 2 nút riêng biệt, kéo được, không nằm trong UI chính
+-- Nút 1: Toggle UI (bật/tắt cửa sổ chính)
+-- Nút 2: Lock UI (khóa vị trí cửa sổ, không kéo được)
+do
+    local UIS = InputService
+    local RS  = RunService
+
+    local BtnGui = Instance.new('ScreenGui')
+    BtnGui.Name = 'TokaiHubButtons'
+    BtnGui.ResetOnSpawn = false
+    BtnGui.ZIndexBehavior = Enum.ZIndexBehavior.Global
+    BtnGui.DisplayOrder = 999
+    pcall(function() BtnGui.Parent = CoreGui end)
+    if BtnGui.Parent ~= CoreGui then
+        BtnGui.Parent = LocalPlayer:WaitForChild('PlayerGui')
+    end
+
+    local function MakeButton(label, color, posX, posY)
+        local frame = Instance.new('Frame')
+        frame.Size = UDim2.fromOffset(54, 28)
+        frame.Position = UDim2.fromOffset(posX, posY)
+        frame.BackgroundColor3 = color
+        frame.BorderSizePixel = 0
+        frame.Active = true
+        frame.ZIndex = 100
+        frame.Parent = BtnGui
+
+        local corner = Instance.new('UICorner')
+        corner.CornerRadius = UDim.new(0, 6)
+        corner.Parent = frame
+
+        local stroke = Instance.new('UIStroke')
+        stroke.Color = Color3.fromRGB(255, 255, 255)
+        stroke.Transparency = 0.85
+        stroke.Thickness = 1
+        stroke.Parent = frame
+
+        local txt = Instance.new('TextLabel')
+        txt.Size = UDim2.fromScale(1, 1)
+        txt.BackgroundTransparency = 1
+        txt.Text = label
+        txt.TextColor3 = Color3.new(1, 1, 1)
+        txt.TextSize = 12
+        txt.Font = Enum.Font.GothamBold
+        txt.ZIndex = 101
+        txt.Parent = frame
+
+        return frame
+    end
+
+    local toggleBtn = MakeButton('≡ UI', Color3.fromRGB(0, 85, 255), 20, 20)
+    local lockBtn   = MakeButton('🔒 Lock', Color3.fromRGB(50, 50, 50), 80, 20)
+
+    local UILocked = false
+
+    -- Make a frame draggable
+    local function MakeDraggableBtn(frame)
+        pcall(function()
+            local Dragging, DragInput, MousePos, FramePos = false, nil, nil, nil
+            frame.InputBegan:Connect(function(Input)
+                if Input.UserInputType == Enum.UserInputType.MouseButton1
+                or Input.UserInputType == Enum.UserInputType.Touch then
+                    Dragging  = true
+                    MousePos  = Input.Position
+                    FramePos  = frame.Position
+                    Input.Changed:Connect(function()
+                        if Input.UserInputState == Enum.UserInputState.End then
+                            Dragging = false
+                        end
+                    end)
+                end
+            end)
+            frame.InputChanged:Connect(function(Input)
+                if Input.UserInputType == Enum.UserInputType.MouseMovement
+                or Input.UserInputType == Enum.UserInputType.Touch then
+                    DragInput = Input
+                end
+            end)
+            UIS.InputChanged:Connect(function(Input)
+                if Input == DragInput and Dragging then
+                    local Delta = Input.Position - MousePos
+                    frame.Position = UDim2.new(
+                        FramePos.X.Scale, FramePos.X.Offset + Delta.X,
+                        FramePos.Y.Scale, FramePos.Y.Offset + Delta.Y
+                    )
+                    -- Sync lockBtn to follow toggleBtn
+                end
+            end)
+        end)
+    end
+
+    MakeDraggableBtn(toggleBtn)
+    MakeDraggableBtn(lockBtn)
+
+    -- Keep lock button 4px to the right of toggle button
+    RS.RenderStepped:Connect(function()
+        lockBtn.Position = UDim2.fromOffset(
+            toggleBtn.Position.X.Offset + toggleBtn.Size.X.Offset + 4,
+            toggleBtn.Position.Y.Offset
+        )
+    end)
+
+    -- Toggle UI button: click to show/hide main window
+    toggleBtn.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            task.delay(0, function()
+                Library.Toggle()
+            end)
+        end
+    end)
+
+    -- Lock UI button: lock/unlock main window dragging
+    lockBtn.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            task.delay(0, function()
+                UILocked = not UILocked
+                if UILocked then
+                    lockBtn.BackgroundColor3 = Color3.fromRGB(200, 60, 60)
+                    lockBtn:FindFirstChildOfClass('TextLabel').Text = '🔒 Lock'
+                    -- Disable dragging on main window by overriding MakeDraggable
+                    Library.UILocked = true
+                else
+                    lockBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+                    lockBtn:FindFirstChildOfClass('TextLabel').Text = '🔓 Free'
+                    Library.UILocked = false
+                end
+            end)
+        end
+    end)
+end
+-- ─────────────────────────────────────────────────────────────────────────────
 
 getgenv().Library = Library
 return Library
