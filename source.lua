@@ -6,15 +6,37 @@ local Players = game:GetService('Players');
 local RunService = game:GetService('RunService')
 local RenderStepped = RunService.RenderStepped;
 local LocalPlayer = Players.LocalPlayer;
-local Mouse = LocalPlayer:GetMouse();
+-- Mouse compat: GetMouse() is deprecated and broken on mobile executors
+-- Use UserInputService:GetMouseLocation() which works on all platforms
+local _MouseObj = LocalPlayer:GetMouse();
+local Mouse = setmetatable({}, {
+    __index = function(_, k)
+        if k == 'X' then
+            return InputService:GetMouseLocation().X
+        elseif k == 'Y' then
+            return InputService:GetMouseLocation().Y
+        else
+            return _MouseObj[k]
+        end
+    end
+});
 
-local ProtectGui = protectgui or (syn and syn.protect_gui) or (function() end);
+-- Executor compat: protectgui varies by executor
+local ProtectGui = protectgui or (syn and syn.protect_gui) or (gethui and function(g) g.Parent = gethui() end) or nil
 
 local ScreenGui = Instance.new('ScreenGui');
-ProtectGui(ScreenGui);
-
+ScreenGui.ResetOnSpawn = false;
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Global;
-ScreenGui.Parent = CoreGui;
+
+-- Parent to CoreGui with protectgui if available, else PlayerGui
+-- CoreGui blocks input on Delta, Wave, and most mobile executors without protectgui
+if ProtectGui then
+    pcall(ProtectGui, ScreenGui)
+    pcall(function() ScreenGui.Parent = CoreGui end)
+end
+if not ScreenGui.Parent or ScreenGui.Parent ~= CoreGui then
+    ScreenGui.Parent = LocalPlayer:WaitForChild('PlayerGui')
+end
 
 local Toggles = {};
 local Options = {};
