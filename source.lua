@@ -1,29 +1,43 @@
-local InputService = game:GetService('UserInputService');
-local TextService = game:GetService('TextService');
-local CoreGui = game:GetService('CoreGui');
-local Teams = game:GetService('Teams');
-local Players = game:GetService('Players');
-local RunService = game:GetService('RunService')
-local RenderStepped = RunService.RenderStepped;
-local LocalPlayer = Players.LocalPlayer;
-local Mouse = LocalPlayer:GetMouse();
+-- Services — same as Obsidian
+local cloneref = cloneref or clonereference or function(i) return i end
+local CoreGui = cloneref(game:GetService('CoreGui'))
+local Players = cloneref(game:GetService('Players'))
+local RunService = cloneref(game:GetService('RunService'))
+local InputService = cloneref(game:GetService('UserInputService'))
+local TextService = cloneref(game:GetService('TextService'))
+local Teams = cloneref(game:GetService('Teams'))
+local TweenService = cloneref(game:GetService('TweenService'))
+local RenderStepped = RunService.RenderStepped
 
-local ScreenGui = Instance.new('ScreenGui');
-ScreenGui.ResetOnSpawn = false;
-ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Global;
-ScreenGui.DisplayOrder = 100;
+local getgenv = getgenv or function() return shared end
+local protectgui = protectgui or (syn and syn.protect_gui) or function() end
+local gethui = gethui or function() return CoreGui end
 
--- Exact same priority chain as Rayfield
-if gethui then
-    ScreenGui.Parent = gethui()
-elseif syn and syn.protect_gui then
-    syn.protect_gui(ScreenGui)
-    ScreenGui.Parent = CoreGui
-elseif CoreGui:FindFirstChild("RobloxGui") then
-    ScreenGui.Parent = CoreGui:FindFirstChild("RobloxGui")
-else
-    ScreenGui.Parent = CoreGui
+local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
+local Mouse = cloneref(LocalPlayer:GetMouse())
+
+-- SafeParentUI — Obsidian pattern: try gethui, fallback PlayerGui
+local function SafeParentUI(Instance, Parent)
+    local ok = pcall(function()
+        local dest = type(Parent) == 'function' and Parent() or (Parent or CoreGui)
+        Instance.Parent = dest
+    end)
+    if not (ok and Instance.Parent) then
+        Instance.Parent = LocalPlayer:WaitForChild('PlayerGui', math.huge)
+    end
 end
+
+local function ParentUI(UI)
+    pcall(protectgui, UI)
+    SafeParentUI(UI, gethui)
+end
+
+local ScreenGui = Instance.new('ScreenGui')
+ScreenGui.Name = 'LibbaUI'
+ScreenGui.DisplayOrder = 999
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Global
+ParentUI(ScreenGui)
 
 local Toggles = {};
 local Options = {};
@@ -126,22 +140,34 @@ function Library:AttemptSave()
     end;
 end;
 
+
+-- Input helpers — copied from Obsidian (Touch + MouseButton1)
+local function IsMouseInput(Input)
+    return Input.UserInputType == Enum.UserInputType.MouseButton1
+        or Input.UserInputType == Enum.UserInputType.Touch
+end
+local function IsClickInput(Input)
+    return IsMouseInput(Input)
+        and Input.UserInputState == Enum.UserInputState.Begin
+end
+local function IsHoverInput(Input)
+    return (Input.UserInputType == Enum.UserInputType.MouseMovement
+        or Input.UserInputType == Enum.UserInputType.Touch)
+        and Input.UserInputState == Enum.UserInputState.Change
+end
 function Library:Create(Class, Properties)
-    local _Instance = Class;
-
+    local _Instance = Class
     if type(Class) == 'string' then
-        _Instance = Instance.new(Class);
-        -- Roblox maps Touch→MouseButton1 only when Active=true (Rayfield relies on this)
+        _Instance = Instance.new(Class)
+        -- Obsidian: TextButton/ImageButton need Active=true for Touch→MouseButton1 mapping
         if Class == 'TextButton' or Class == 'ImageButton' then
-            _Instance.Active = true;
+            _Instance.Active = true
         end
-    end;
-
+    end
     for Property, Value in next, Properties do
-        pcall(function() _Instance[Property] = Value end);
-    end;
-
-    return _Instance;
+        pcall(function() _Instance[Property] = Value end)
+    end
+    return _Instance
 end;
 
 function Library:CreateLabel(Properties, IsHud)
@@ -160,50 +186,36 @@ function Library:CreateLabel(Properties, IsHud)
     return Library:Create(_Instance, Properties);
 end;
 
-local TweenService = game:GetService('TweenService');
+-- MakeDraggable — exact Obsidian implementation (Touch + MouseButton1)
+function Library:MakeDraggable(UI, DragFrame, IgnoreToggled)
+    DragFrame = DragFrame or UI
+    local StartPos, FramePos, Dragging, Changed = nil, nil, false, nil
+    DragFrame.Active = true
 
--- Exact Rayfield drag pattern: Input.Position delta + TweenService smooth
-function Library:MakeDraggable(DragPoint, Main, Cutoff)
-    Main = Main or DragPoint;
-    pcall(function()
-        local Dragging, DragInput, MousePos, FramePos = false, nil, nil, nil;
-        DragPoint.Active = true;
-
-        DragPoint.InputBegan:Connect(function(Input)
-            if Input.UserInputType == Enum.UserInputType.MouseButton1 then
-                -- Cutoff: only drag from top area
-                local relY = Input.Position.Y - DragPoint.AbsolutePosition.Y;
-                if relY > (Cutoff or 50) then return end;
-
-                Dragging = true;
-                MousePos = Input.Position;
-                FramePos = Main.Position;
-
-                Input.Changed:Connect(function()
-                    if Input.UserInputState == Enum.UserInputState.End then
-                        Dragging = false;
-                    end
-                end)
-            end
+    DragFrame.InputBegan:Connect(function(Input)
+        if not IsClickInput(Input) then return end
+        StartPos = Input.Position
+        FramePos = UI.Position
+        Dragging = true
+        Changed = Input.Changed:Connect(function()
+            if Input.UserInputState ~= Enum.UserInputState.End then return end
+            Dragging = false
+            if Changed and Changed.Connected then Changed:Disconnect(); Changed = nil end
         end)
+    end)
 
-        DragPoint.InputChanged:Connect(function(Input)
-            if Input.UserInputType == Enum.UserInputType.MouseMovement then
-                DragInput = Input;
-            end
-        end)
-
-        InputService.InputChanged:Connect(function(Input)
-            if Input == DragInput and Dragging then
-                local Delta = Input.Position - MousePos;
-                TweenService:Create(Main, TweenInfo.new(0.45, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
-                    Position = UDim2.new(
-                        FramePos.X.Scale, FramePos.X.Offset + Delta.X,
-                        FramePos.Y.Scale, FramePos.Y.Offset + Delta.Y
-                    )
-                }):Play()
-            end
-        end)
+    InputService.InputChanged:Connect(function(Input)
+        if not (ScreenGui and ScreenGui.Parent) then
+            Dragging = false
+            if Changed and Changed.Connected then Changed:Disconnect(); Changed = nil end
+            return
+        end
+        if Dragging and IsHoverInput(Input) then
+            local Delta = Input.Position - StartPos
+            UI.Position = UDim2.new(
+                FramePos.X.Scale, FramePos.X.Offset + Delta.X,
+                FramePos.Y.Scale, FramePos.Y.Offset + Delta.Y)
+        end
     end)
 end;
 
@@ -756,7 +768,7 @@ do
                 );
 
                 Button.InputBegan:Connect(function(Input)
-                    if Input.UserInputType ~= Enum.UserInputType.MouseButton1 then
+                    if Input.UserInputType ~= Enum.UserInputType.MouseButton1 and Input.UserInputType ~= Enum.UserInputType.Touch then
                         return
                     end
 
@@ -931,7 +943,7 @@ do
         end);
 
         DisplayFrame.InputBegan:Connect(function(Input)
-            if Input.UserInputType == Enum.UserInputType.MouseButton1 and not Library:MouseIsOverOpenedFrame() then
+            if IsClickInput(Input) and not Library:MouseIsOverOpenedFrame() then
                 if PickerFrameOuter.Visible then
                     ColorPicker:Hide()
                 else
@@ -1221,7 +1233,7 @@ do
         local Picking = false;
 
         PickOuter.InputBegan:Connect(function(Input)
-            if Input.UserInputType == Enum.UserInputType.MouseButton1 and not Library:MouseIsOverOpenedFrame() then
+            if IsClickInput(Input) and not Library:MouseIsOverOpenedFrame() then
                 Picking = true;
 
                 DisplayLabel.Text = '';
@@ -1493,7 +1505,7 @@ do
                     return false
                 end
 
-                if Input.UserInputType ~= Enum.UserInputType.MouseButton1 then
+                if Input.UserInputType ~= Enum.UserInputType.MouseButton1 and Input.UserInputType ~= Enum.UserInputType.Touch then
                     return false
                 end
 
@@ -1913,8 +1925,8 @@ do
         end;
 
         ToggleRegion.InputBegan:Connect(function(Input)
-            if Input.UserInputType == Enum.UserInputType.MouseButton1 and not Library:MouseIsOverOpenedFrame() then
-                Toggle:SetValue(not Toggle.Value) -- Why was it not like this from the start?
+            if IsClickInput(Input) and not Library:MouseIsOverOpenedFrame() then
+                Toggle:SetValue(not Toggle.Value)
                 Library:AttemptSave();
             end;
         end);
@@ -2099,7 +2111,7 @@ do
         end;
 
         SliderInner.InputBegan:Connect(function(Input)
-            if Input.UserInputType == Enum.UserInputType.MouseButton1 and not Library:MouseIsOverOpenedFrame() then
+            if IsClickInput(Input) and not Library:MouseIsOverOpenedFrame() then
                 local mPos = Mouse.X;
                 local gPos = Fill.Size.X.Offset;
                 local Diff = mPos - (Fill.AbsolutePosition.X + gPos);
@@ -2497,7 +2509,7 @@ do
         end;
 
         DropdownOuter.InputBegan:Connect(function(Input)
-            if Input.UserInputType == Enum.UserInputType.MouseButton1 and not Library:MouseIsOverOpenedFrame() then
+            if IsClickInput(Input) and not Library:MouseIsOverOpenedFrame() then
                 if ListOuter.Visible then
                     Dropdown:CloseDropdown();
                 else
@@ -3409,7 +3421,7 @@ function Library:CreateWindow(...)
                 end;
 
                 Button.InputBegan:Connect(function(Input)
-                    if Input.UserInputType == Enum.UserInputType.MouseButton1 and not Library:MouseIsOverOpenedFrame() then
+                    if IsClickInput(Input) and not Library:MouseIsOverOpenedFrame() then
                         Tab:Show();
                         Tab:Resize();
                     end;
@@ -3464,13 +3476,13 @@ function Library:CreateWindow(...)
         Size = UDim2.new(0, 0, 0, 0);
         Visible = true;
         Text = '';
-        Modal = false; -- never true: Modal kills touch on mobile
+        Modal = false; -- Obsidian: never set true, kills touch on mobile
         Parent = ScreenGui;
     });
 
     function Library.Toggle()
         Outer.Visible = not Outer.Visible;
-        -- ModalElement.Modal intentionally never set: kills mobile touch
+        -- ModalElement.Modal: never set (kills mobile touch, Obsidian keeps false)
 
         local oIcon = Mouse.Icon;
         local State = InputService.MouseIconEnabled;
@@ -3526,89 +3538,69 @@ end;
 Players.PlayerAdded:Connect(OnPlayerChange);
 Players.PlayerRemoving:Connect(OnPlayerChange);
 
--- ── FLOATING BUTTONS ──────────────────────────────────────────────────────
--- 2 nút kéo được, riêng biệt, không nằm trong UI chính
--- Roblox maps Touch→MouseButton1 when Active=true (same as Rayfield)
-do
+-- Floating buttons — Obsidian SafeParentUI, Touch+MouseButton1
+task.spawn(function()
+    task.wait(0.3)
     local BtnGui = Instance.new('ScreenGui')
     BtnGui.Name = 'TokaiHubButtons'
     BtnGui.ResetOnSpawn = false
-    BtnGui.DisplayOrder = 101
+    BtnGui.DisplayOrder = 1000
     BtnGui.ZIndexBehavior = Enum.ZIndexBehavior.Global
-    if gethui then BtnGui.Parent = gethui()
-    elseif syn and syn.protect_gui then syn.protect_gui(BtnGui); BtnGui.Parent = CoreGui
-    elseif CoreGui:FindFirstChild("RobloxGui") then BtnGui.Parent = CoreGui:FindFirstChild("RobloxGui")
-    else BtnGui.Parent = CoreGui end
+    ParentUI(BtnGui)
 
-    local function MakeFloatBtn(label, color, posX, posY)
+    local function MakeBtn(text, color, x, y)
         local f = Instance.new('TextButton')
-        f.Name = label
-        f.Size = UDim2.fromOffset(52, 26)
-        f.Position = UDim2.fromOffset(posX, posY)
-        f.BackgroundColor3 = color
-        f.BorderSizePixel = 0
-        f.Text = label
-        f.TextColor3 = Color3.new(1,1,1)
-        f.TextSize = 11
-        f.Font = Enum.Font.GothamBold
-        f.ZIndex = 10
-        f.Active = true  -- Touch→MouseButton1 on mobile
-        f.Parent = BtnGui
+        f.Size = UDim2.fromOffset(54, 26); f.Position = UDim2.fromOffset(x, y)
+        f.BackgroundColor3 = color; f.BorderSizePixel = 0
+        f.Text = text; f.TextColor3 = Color3.new(1,1,1)
+        f.TextSize = 11; f.Font = Enum.Font.GothamBold
+        f.ZIndex = 10; f.Active = true; f.Parent = BtnGui
         Instance.new('UICorner', f).CornerRadius = UDim.new(0,6)
         local s = Instance.new('UIStroke', f)
         s.Color = Color3.new(1,1,1); s.Transparency = 0.8; s.Thickness = 1
         return f
     end
 
-    local toggleBtn = MakeFloatBtn('≡ UI', Color3.fromRGB(0,85,255), 20, 20)
-    local lockBtn   = MakeFloatBtn('🔒', Color3.fromRGB(50,50,50), 78, 20)
+    local toggleBtn = MakeBtn('≡ UI', Color3.fromRGB(0,85,255), 20, 20)
+    local lockBtn   = MakeBtn('🔒', Color3.fromRGB(50,50,50), 80, 20)
 
-    -- Rayfield drag pattern on floating buttons
+    -- Drag — Obsidian pattern
     local function DragBtn(btn)
-        pcall(function()
-            local Dragging, DragInput, MousePos, FramePos = false, nil, nil, nil
-            btn.InputBegan:Connect(function(Input)
-                if Input.UserInputType == Enum.UserInputType.MouseButton1 then
-                    Dragging = true
-                    MousePos = Input.Position
-                    FramePos = btn.Position
-                    Input.Changed:Connect(function()
-                        if Input.UserInputState == Enum.UserInputState.End then Dragging = false end
-                    end)
-                end
+        local StartPos, FramePos, Dragging, Changed = nil, nil, false, nil
+        btn.InputBegan:Connect(function(Input)
+            if not IsClickInput(Input) then return end
+            StartPos = Input.Position; FramePos = btn.Position; Dragging = true
+            Changed = Input.Changed:Connect(function()
+                if Input.UserInputState ~= Enum.UserInputState.End then return end
+                Dragging = false
+                if Changed and Changed.Connected then Changed:Disconnect(); Changed = nil end
             end)
-            btn.InputChanged:Connect(function(Input)
-                if Input.UserInputType == Enum.UserInputType.MouseMovement then DragInput = Input end
-            end)
-            game:GetService('UserInputService').InputChanged:Connect(function(Input)
-                if Input == DragInput and Dragging then
-                    local D = Input.Position - MousePos
-                    btn.Position = UDim2.new(FramePos.X.Scale, FramePos.X.Offset+D.X, FramePos.Y.Scale, FramePos.Y.Offset+D.Y)
-                end
-            end)
+        end)
+        InputService.InputChanged:Connect(function(Input)
+            if Dragging and IsHoverInput(Input) then
+                local D = Input.Position - StartPos
+                btn.Position = UDim2.new(FramePos.X.Scale, FramePos.X.Offset+D.X,
+                                         FramePos.Y.Scale, FramePos.Y.Offset+D.Y)
+            end
         end)
     end
 
     DragBtn(toggleBtn)
-    -- Lock button follows toggle button
-    game:GetService('RunService').RenderStepped:Connect(function()
-        lockBtn.Position = UDim2.fromOffset(
-            toggleBtn.Position.X.Offset + 56,
-            toggleBtn.Position.Y.Offset)
+    RunService.RenderStepped:Connect(function()
+        lockBtn.Position = UDim2.fromOffset(toggleBtn.Position.X.Offset+58, toggleBtn.Position.Y.Offset)
     end)
 
     local UILocked = false
     toggleBtn.MouseButton1Click:Connect(function()
-        Library.Toggle()
+        if Library and Library.Toggle then Library.Toggle() end
     end)
     lockBtn.MouseButton1Click:Connect(function()
         UILocked = not UILocked
-        Library.UILocked = UILocked
+        if Library then Library.UILocked = UILocked end
         lockBtn.Text = UILocked and '🔒' or '🔓'
         lockBtn.BackgroundColor3 = UILocked and Color3.fromRGB(200,60,60) or Color3.fromRGB(50,50,50)
     end)
-end
--- ───────────────────────────────────────────────────────────────────────────
+end)
 
 getgenv().Library = Library
 return Library
