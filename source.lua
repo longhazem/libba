@@ -6,12 +6,45 @@ local Players = game:GetService('Players');
 local RunService = game:GetService('RunService')
 local TweenService = game:GetService('TweenService');
 local Workspace = game:GetService('Workspace');
+
+-- ── Executor compatibility shim ──────────────────────────────────────────────
+-- Polyfill task.* for executors that don't support it (Fluxus old, Electron, etc.)
+if not task then
+    task = {
+        wait    = function(n) return wait(n or 0) end,
+        spawn   = function(f, ...) return spawn(f, ...) end,
+        delay   = function(n, f, ...) return delay(n, f, ...) end,
+        defer   = function(f, ...) return spawn(f, ...) end,
+    }
+end
+-- Polyfill table.move if missing (some stripped environments)
+if not table.move then
+    table.move = function(a1, f, e, t, a2)
+        a2 = a2 or a1
+        if e >= f then
+            local n = e - f + 1
+            for i = n, 1, -1 do a2[t+i-1] = a1[f+i-1] end
+        end
+        return a2
+    end
+end
+-- ─────────────────────────────────────────────────────────────────────────────
+
 local RenderStepped = RunService.RenderStepped;
 local LocalPlayer = Players.LocalPlayer;
 local Mouse = LocalPlayer:GetMouse();
 local GuiService = game:GetService('GuiService');
 
-local ProtectGui = protectgui or (syn and syn.protect_gui) or (function() end);
+local ProtectGui = (function()
+    -- Multi-executor safe: check all known protect_gui APIs
+    if type(protectgui) == 'function' then return protectgui end
+    if syn and type(syn.protect_gui) == 'function' then return syn.protect_gui end
+    if gethui and type(gethui) == 'function' then
+        -- Executors that use gethui() as the protected container (e.g. Solara, Electron)
+        return function(gui) gui.Parent = gethui() end
+    end
+    return function() end  -- fallback: no-op (Delta, Codex, etc.)
+end)()
 
 -- OverlayGui: IgnoreGuiInset=true so Dimmer and SplashScreen cover full screen.
 -- DisplayOrder=-1 makes it render BEHIND ScreenGui, so it doesn't overlay the main GUI.
@@ -20,7 +53,21 @@ ProtectGui(OverlayGui);
 OverlayGui.ZIndexBehavior = Enum.ZIndexBehavior.Global;
 OverlayGui.IgnoreGuiInset = true;
 OverlayGui.DisplayOrder = -1;
-OverlayGui.Parent = CoreGui;
+-- Multi-executor GUI parenting
+local function SafeParentGui(gui)
+    pcall(function()
+        if gethui and type(gethui) == 'function' then
+            ProtectGui(gui)
+            if gui.Parent == nil or gui.Parent == game then
+                gui.Parent = gethui()
+            end
+        else
+            ProtectGui(gui)
+            gui.Parent = CoreGui
+        end
+    end)
+end
+SafeParentGui(OverlayGui)
 
 -- Main ScreenGui: no IgnoreGuiInset so Mouse.X/Y and AbsolutePosition match (original behavior).
 -- DisplayOrder=0 (default) renders on top of OverlayGui.
@@ -28,13 +75,15 @@ local ScreenGui = Instance.new('ScreenGui');
 ProtectGui(ScreenGui);
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Global;
 ScreenGui.DisplayOrder = 0;
-ScreenGui.Parent = CoreGui;
+SafeParentGui(ScreenGui)
 
 local Toggles = {};
 local Options = {};
 
-getgenv().Toggles = Toggles;
-getgenv().Options = Options;
+-- Expose globals safely across all executor environments
+local _genv = (type(getgenv) == 'function' and getgenv()) or getfenv(0) or _G
+_genv.Toggles = Toggles
+_genv.Options = Options
 
 local Library = {
     Registry = {};
@@ -337,81 +386,58 @@ function Library:MakeDraggable(Instance, Cutoff, IsMainWindow)
         return (Cutoff or 40) * scale
     end
 
-    if Library.IsMobile == false then
+    -- Unified drag: mouse + touch, Obsidian delta method (no raw Mouse.X/Y)
+    do
+        local Dragging = false
+        local DraggingInput = nil
+        local DragStart = nil
+        local FrameStart = nil
+
         Instance.InputBegan:Connect(function(Input)
-            if Input.UserInputType == Enum.UserInputType.MouseButton1 then
-                if IsMainWindow == true and Library.CantDragForced == true then
-                    return;
-                end;
+            local isMouse = Input.UserInputType == Enum.UserInputType.MouseButton1
+            local isTouch = Input.UserInputType == Enum.UserInputType.Touch
+            if not (isMouse or isTouch) then return end
+            if IsMainWindow == true and Library.CantDragForced == true then return end
+            if IsMainWindow == true and Library.Window and Library.Window.Holder
+                and Library.Window.Holder.Visible == false then return end
 
-                local ObjPos = Vector2.new(
-                    Mouse.X - Instance.AbsolutePosition.X,
-                    Mouse.Y - Instance.AbsolutePosition.Y
-                );
+            -- Topbar cutoff: only drag from the top portion
+            local relY = Input.Position.Y - Instance.AbsolutePosition.Y
+            if relY > GetCutoff() then return end
 
-                if ObjPos.Y > GetCutoff() then
-                    return;
-                end;
+            Dragging = true
+            DraggingInput = Input
+            DragStart = Input.Position
+            FrameStart = Instance.Position
 
-                while InputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) do
-                    Instance.Position = UDim2.new(
-                        0,
-                        Mouse.X - ObjPos.X + (Instance.Size.X.Offset * Instance.AnchorPoint.X),
-                        0,
-                        Mouse.Y - ObjPos.Y + (Instance.Size.Y.Offset * Instance.AnchorPoint.Y)
-                    );
-
-                    RenderStepped:Wait();
-                end;
-            end;
-        end)
-    else
-        local Dragging = false;
-        local DraggingInput = nil;
-        local DraggingStart = nil;
-        local StartPosition = nil;
-
-        InputService.TouchStarted:Connect(function(Input)
-            if IsMainWindow == true and Library.CantDragForced == true then
-                Dragging = false;
-                return;
-            end;
-
-            if not Dragging and Library:IsMouseOverFrame(Instance, Input) and (IsMainWindow ~= true or (Library.CanDrag and Library.Window and Library.Window.Holder and Library.Window.Holder.Visible == true)) then
-                local ObjPosY = Input.Position.Y - Instance.AbsolutePosition.Y
-                if ObjPosY > GetCutoff() then
-                    Dragging = false;
-                    return;
+            local conn
+            conn = Input.Changed:Connect(function()
+                if Input.UserInputState == Enum.UserInputState.End then
+                    Dragging = false
+                    if conn and conn.Connected then conn:Disconnect() end
                 end
+            end)
+        end)
 
-                DraggingInput = Input;
-                DraggingStart = Input.Position;
-                StartPosition = Instance.Position;
-                Dragging = true;
-            end;
-        end);
+        table.insert(Library.Signals, InputService.InputChanged:Connect(function(Input)
+            if not Dragging or not DraggingInput then return end
+            if IsMainWindow == true and Library.CantDragForced == true then return end
 
-        InputService.TouchMoved:Connect(function(Input)
-            if Input == DraggingInput and Dragging then
-                if IsMainWindow == true and not (Library.CanDrag and Library.Window and Library.Window.Holder and Library.Window.Holder.Visible == true) then
-                    return;
-                end;
+            local isMoveMatch = (Input.UserInputType == Enum.UserInputType.MouseMovement
+                and DraggingInput.UserInputType == Enum.UserInputType.MouseButton1)
+            local isTouchMatch = (Input == DraggingInput
+                and Input.UserInputType == Enum.UserInputType.Touch)
 
-                local OffsetPos = Input.Position - DraggingStart;
-                Instance.Position = UDim2.new(
-                    StartPosition.X.Scale,
-                    StartPosition.X.Offset + OffsetPos.X,
-                    StartPosition.Y.Scale,
-                    StartPosition.Y.Offset + OffsetPos.Y
-                );
-            end;
-        end);
+            if not (isMoveMatch or isTouchMatch) then return end
 
-        InputService.TouchEnded:Connect(function(Input)
-            if Input == DraggingInput then
-                Dragging = false;
-            end;
-        end);
+            local Delta = Input.Position - DragStart
+            Instance.Position = UDim2.new(
+                FrameStart.X.Scale,
+                FrameStart.X.Offset + Delta.X,
+                FrameStart.Y.Scale,
+                FrameStart.Y.Offset + Delta.Y
+            )
+        end))
     end
 end;
 
@@ -565,6 +591,18 @@ function Library:AddToRegistry(Instance, Properties, IsHud)
     if IsHud then
         table.insert(Library.HudRegistry, Data);
     end;
+
+    -- FIX: Apply colors immediately on registration so elements never flash white.
+    -- Previously colors only applied on the next RenderStepped frame.
+    pcall(function()
+        for Property, ColorIdx in next, Properties do
+            if type(ColorIdx) == 'string' then
+                Instance[Property] = Library:GetColor(ColorIdx);
+            elseif type(ColorIdx) == 'function' then
+                Instance[Property] = ColorIdx();
+            end
+        end
+    end)
 end;
 
 function Library:RemoveFromRegistry(Instance)
@@ -1720,11 +1758,11 @@ do
                         Text = Text .. '.';
                         DisplayLabel.Text = Text;
 
-                        wait(0.4);
+                        task.wait(0.4);
                     end;
                 end);
 
-                wait(0.2);
+                task.wait(0.2);
 
                 local Event;
                 Event = InputService.InputBegan:Connect(function(Input)
@@ -2835,8 +2873,8 @@ do
             ZIndex = 21;
             Parent = ListInner;
 
-            TopImage = 'rbxasset://textures/ui/Scroll/scroll-middle.png',
-            BottomImage = 'rbxasset://textures/ui/Scroll/scroll-middle.png',
+            TopImage = '',
+            BottomImage = '',
 
             ScrollBarThickness = 3,
             ScrollBarImageColor3 = Library.AccentColor,
@@ -3369,6 +3407,120 @@ function Library:SetWatermark(Text)
     Library.WatermarkText.Text = Text;
 end;
 
+-- ── Mobile Draggable Button (ported from Obsidian) ─────────────────
+function Library:AddDraggableButton(Text, Func)
+    local Table = {}
+
+    local ButtonHolder = Library:Create('Frame', {
+        BackgroundColor3 = Library.BackgroundColor;
+        BorderColor3 = Library.OutlineColor;
+        Position = UDim2.fromOffset(6, 6);
+        Size = UDim2.fromOffset(70, 28);
+        ZIndex = 300;
+        Parent = ScreenGui;
+    })
+
+    Library:AddToRegistry(ButtonHolder, {
+        BackgroundColor3 = 'BackgroundColor';
+        BorderColor3 = 'OutlineColor';
+    })
+
+    local ButtonInner = Library:Create('Frame', {
+        BackgroundColor3 = Library.MainColor;
+        BorderColor3 = Library.OutlineColor;
+        BorderMode = Enum.BorderMode.Inset;
+        Size = UDim2.new(1, 0, 1, 0);
+        ZIndex = 301;
+        Parent = ButtonHolder;
+    })
+
+    Library:AddToRegistry(ButtonInner, {
+        BackgroundColor3 = 'MainColor';
+        BorderColor3 = 'OutlineColor';
+    })
+
+    local ButtonLabel = Library:CreateLabel({
+        Size = UDim2.new(1, 0, 1, 0);
+        TextSize = 13;
+        Text = Text;
+        ZIndex = 302;
+        Parent = ButtonInner;
+    })
+
+    -- Make the button itself draggable anywhere on screen
+    do
+        local Dragging = false
+        local DraggingInput = nil
+        local DragStart = nil
+        local StartPosition = nil
+
+        local function onInputBegan(Input)
+            local isClick = Input.UserInputType == Enum.UserInputType.MouseButton1
+            local isTouch = Input.UserInputType == Enum.UserInputType.Touch
+            if isClick or isTouch then
+                Dragging = true
+                DraggingInput = Input
+                DragStart = Input.Position
+                StartPosition = ButtonHolder.Position
+
+                local conn
+                conn = Input.Changed:Connect(function()
+                    if Input.UserInputState == Enum.UserInputState.End then
+                        Dragging = false
+                        if conn and conn.Connected then conn:Disconnect() end
+                    end
+                end)
+            end
+        end
+
+        local function onInputChanged(Input)
+            if not Dragging or DraggingInput == nil then return end
+            local isMoveMatch = (Input.UserInputType == Enum.UserInputType.MouseMovement and
+                DraggingInput.UserInputType == Enum.UserInputType.MouseButton1)
+            local isTouchMatch = (Input == DraggingInput and Input.UserInputType == Enum.UserInputType.Touch)
+            if isMoveMatch or isTouchMatch then
+                local Delta = Input.Position - DragStart
+                ButtonHolder.Position = UDim2.new(
+                    StartPosition.X.Scale,
+                    StartPosition.X.Offset + Delta.X,
+                    StartPosition.Y.Scale,
+                    StartPosition.Y.Offset + Delta.Y
+                )
+            end
+        end
+
+        ButtonHolder.InputBegan:Connect(onInputBegan)
+        table.insert(Library.Signals, game:GetService('UserInputService').InputChanged:Connect(onInputChanged))
+    end
+
+    -- Click fires callback
+    ButtonHolder.InputBegan:Connect(function(Input)
+        if (Input.UserInputType == Enum.UserInputType.MouseButton1
+            or Input.UserInputType == Enum.UserInputType.Touch) then
+            -- Only fire click if not dragging (simple tap detection)
+            local OrigPos = ButtonHolder.Position
+            task.wait(0.15)
+            if ButtonHolder.Position == OrigPos then
+                Library:SafeCallback(Func, Table)
+            end
+        end
+    end)
+
+    Table.Button = ButtonHolder
+    Table.Label = ButtonLabel
+
+    function Table:SetText(NewText)
+        ButtonLabel.Text = NewText
+    end
+
+    function Table:SetPosition(X, Y)
+        ButtonHolder.Position = UDim2.fromOffset(X, Y)
+    end
+
+    return Table
+end
+-- ────────────────────────────────────────────────────────────────────
+
 function Library:Notify(Text, Time)
     local XSize, YSize = Library:GetTextBounds(Text, Library.Font, 14);
 
@@ -3450,11 +3602,11 @@ function Library:Notify(Text, Time)
     pcall(NotifyOuter.TweenSize, NotifyOuter, UDim2.new(0, XSize + 8 + 4, 0, YSize), 'Out', 'Quad', 0.4, true);
 
     task.spawn(function()
-        wait(Time or 5);
+        task.wait(Time or 5);
 
         pcall(NotifyOuter.TweenSize, NotifyOuter, UDim2.new(0, 0, 0, YSize), 'Out', 'Quad', 0.4, true);
 
-        wait(0.4);
+        task.wait(0.4);
 
         NotifyOuter:Destroy();
     end);
@@ -4059,46 +4211,28 @@ function Library:CreateWindow(...)
         Parent = ScreenGui;
     });
 
-    local MobileOpenButton, MobileCloseButton;
+    -- ── Mobile Buttons (Obsidian-style draggable) ───────────────────────
+    local MobileToggleBtn, MobileLockBtn
     if Library.IsMobile then
-        MobileOpenButton = Library:Create('TextButton', {
-            AnchorPoint = Vector2.new(0, 1);
-            Position = UDim2.new(0, 10, 1, -10);
-            Size = UDim2.new(0, 90, 0, 30);
-            BackgroundColor3 = Library.MainColor;
-            BorderColor3 = Library.AccentColor;
-            Text = 'Open UI';
-            Font = Library.Font;
-            TextSize = 14;
-            TextColor3 = Library.FontColor;
-            Visible = false;
-            ZIndex = 300;
-            Parent = ScreenGui;
-        });
+        -- Toggle button: tap to show/hide UI, drag to reposition anywhere
+        MobileToggleBtn = Library:AddDraggableButton('☰ UI', function()
+            task.spawn(Library.Toggle)
+        end)
+        MobileToggleBtn:SetPosition(6, 6)
 
-        MobileCloseButton = Library:Create('TextButton', {
-            AnchorPoint = Vector2.new(1, 0);
-            Position = UDim2.new(1, -6, 0, 6);
-            Size = UDim2.new(0, 54, 0, 20);
-            BackgroundColor3 = Library.MainColor;
-            BorderColor3 = Library.AccentColor;
-            Text = 'Hide';
-            Font = Library.Font;
-            TextSize = 14;
-            TextColor3 = Library.FontColor;
-            Visible = false;
-            ZIndex = 300;
-            Parent = Outer;
-        });
+        -- Lock button: tap to lock/unlock drag on the main window
+        MobileLockBtn = Library:AddDraggableButton('🔓 Drag', function(self)
+            Library.CantDragForced = not Library.CantDragForced
+            self:SetText(Library.CantDragForced and '🔒 Lock' or '🔓 Drag')
+        end)
+        MobileLockBtn:SetPosition(6, 42)
 
-        MobileOpenButton.MouseButton1Click:Connect(function()
-            task.spawn(Library.Toggle);
-        end);
-
-        MobileCloseButton.MouseButton1Click:Connect(function()
-            task.spawn(Library.Toggle);
-        end);
+        -- Hide both initially; shown when UI opens
+        MobileToggleBtn.Button.Visible = false
+        MobileLockBtn.Button.Visible = false
     end
+    -- ─────────────────────────────────────────────────────────────────────
+    local MobileOpenButton, MobileCloseButton  -- keep nil for compat
 
 
     local TransparencyCache = {};
@@ -4118,6 +4252,13 @@ function Library:CreateWindow(...)
         if Toggled then
             Outer.Visible = true;
             Library.MenuOpen = true;
+            -- Mobile: show Lock button when UI opens, hide Toggle btn
+            if MobileToggleBtn then
+                MobileToggleBtn.Button.Visible = false
+            end
+            if MobileLockBtn then
+                MobileLockBtn.Button.Visible = true
+            end
             if MobileOpenButton then
                 MobileOpenButton.Visible = false;
             end
@@ -4180,6 +4321,13 @@ function Library:CreateWindow(...)
         if not Toggled then
             Library.MenuOpen = false;
             Outer.Visible = false;
+            -- Mobile: show Toggle button when UI hidden, hide Lock btn
+            if MobileToggleBtn then
+                MobileToggleBtn.Button.Visible = true
+            end
+            if MobileLockBtn then
+                MobileLockBtn.Button.Visible = false
+            end
             if MobileOpenButton then
                 MobileOpenButton.Visible = true;
             end
@@ -4294,5 +4442,5 @@ end
 
 task.spawn(function() Library:SplashAnimation() end)
 
-getgenv().Library = Library
+_genv.Library = Library
 return Library
