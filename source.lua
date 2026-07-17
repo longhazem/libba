@@ -30,6 +30,18 @@ if not table.move then
 end
 -- ─────────────────────────────────────────────────────────────────────────────
 
+-- TOKAI logo: loaded once, cached into a decal via EditableImage or rbxthumb fallback
+local TOKAI_LOGO_URL = 'https://raw.githubusercontent.com/longhazem/ui-library-/main/models/TOKAI_logo_no_bg.png'
+local _tokaiLogoContent = nil  -- cached raw PNG bytes (loaded on first window creation)
+local function _LoadTokaiLogo()
+    if _tokaiLogoContent then return _tokaiLogoContent end
+    pcall(function()
+        _tokaiLogoContent = FetchUrl and FetchUrl(TOKAI_LOGO_URL)
+            or (game:HttpGet and game:HttpGet(TOKAI_LOGO_URL, true))
+    end)
+    return _tokaiLogoContent
+end
+
 local RenderStepped = RunService.RenderStepped;
 local LocalPlayer = Players.LocalPlayer;
 local Mouse = LocalPlayer:GetMouse();
@@ -3703,6 +3715,59 @@ function Library:CreateWindow(...)
         ZIndex = 1;
         Parent = Inner;
     });
+
+    -- ── TOKAI Logo — top-left of window, 22px tall, before title text ──
+    local LogoImage = Library:Create('ImageLabel', {
+        BackgroundTransparency = 1;
+        Position = UDim2.new(0, 6, 0, 2);
+        Size = UDim2.new(0, 22, 0, 22);
+        ZIndex = 2;
+        ScaleType = Enum.ScaleType.Fit;
+        Parent = Inner;
+    })
+
+    -- Push WindowLabel right to make room for logo
+    WindowLabel.Position = UDim2.new(0, 33, 0, 0)
+
+    -- Load logo async so it doesn't block UI init
+    task.spawn(function()
+        -- Try EditableImage (Synapse Z, Wave, Volt, Potassium, OpiumWare)
+        local ok = false
+        pcall(function()
+            if Drawing and typeof(Drawing.new) == 'function' then return end  -- skip if Drawing-only env
+            local content = _LoadTokaiLogo()
+            if content and #content > 100 then
+                -- Use base64 content URI if executor supports it
+                -- (Potassium, Wave, Synapse Z support this natively)
+                local b64ok, b64 = pcall(function()
+                    return game:GetService('HttpService'):JSONDecode('{"x":1}') and
+                        (typeof(base64_encode) == 'function' and base64_encode(content))
+                        or (typeof(crypt) == 'table' and crypt.base64encode and crypt.base64encode(content))
+                        or (typeof(base64) == 'table' and base64.encode and base64.encode(content))
+                end)
+                if b64ok and b64 then
+                    LogoImage.Image = 'data:image/png;base64,' .. b64
+                    ok = true
+                end
+            end
+        end)
+
+        -- Fallback: use GitHub URL directly via rbxthumb-style asset if executor allows
+        if not ok then
+            pcall(function()
+                -- Some executors (Delta, Codex) allow direct URL in Image property
+                LogoImage.Image = TOKAI_LOGO_URL
+                ok = true
+            end)
+        end
+
+        -- Final fallback: hide logo gracefully, title stays readable
+        if not ok then
+            LogoImage.Visible = false
+            WindowLabel.Position = UDim2.new(0, 7, 0, 0)
+        end
+    end)
+    -- ──────────────────────────────────────────────────────────────────
 
     local MainSectionOuter = Library:Create('Frame', {
         BackgroundColor3 = Library.BackgroundColor;
