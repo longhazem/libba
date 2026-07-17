@@ -4211,25 +4211,14 @@ function Library:CreateWindow(...)
         Parent = ScreenGui;
     });
 
-    -- ── Mobile Buttons (Obsidian-style draggable) ───────────────────────
-    local MobileToggleBtn, MobileLockBtn
+    -- ── Mobile Toggle Button (draggable, tap = show/hide UI) ──────────
+    local MobileToggleBtn
     if Library.IsMobile then
-        -- Toggle button: tap to show/hide UI, drag to reposition anywhere
         MobileToggleBtn = Library:AddDraggableButton('☰ UI', function()
             task.spawn(Library.Toggle)
         end)
         MobileToggleBtn:SetPosition(6, 6)
-
-        -- Lock button: tap to lock/unlock drag on the main window
-        MobileLockBtn = Library:AddDraggableButton('🔓 Drag', function(self)
-            Library.CantDragForced = not Library.CantDragForced
-            self:SetText(Library.CantDragForced and '🔒 Lock' or '🔓 Drag')
-        end)
-        MobileLockBtn:SetPosition(6, 42)
-
-        -- Hide both initially; shown when UI opens
-        MobileToggleBtn.Button.Visible = false
-        MobileLockBtn.Button.Visible = false
+        MobileToggleBtn.Button.Visible = true
     end
     -- ─────────────────────────────────────────────────────────────────────
     local MobileOpenButton, MobileCloseButton  -- keep nil for compat
@@ -4252,12 +4241,9 @@ function Library:CreateWindow(...)
         if Toggled then
             Outer.Visible = true;
             Library.MenuOpen = true;
-            -- Mobile: show Lock button when UI opens, hide Toggle btn
+            -- Mobile: update toggle button text when UI opens
             if MobileToggleBtn then
-                MobileToggleBtn.Button.Visible = false
-            end
-            if MobileLockBtn then
-                MobileLockBtn.Button.Visible = true
+                MobileToggleBtn:SetText('✕ UI')
             end
             if MobileOpenButton then
                 MobileOpenButton.Visible = false;
@@ -4321,12 +4307,9 @@ function Library:CreateWindow(...)
         if not Toggled then
             Library.MenuOpen = false;
             Outer.Visible = false;
-            -- Mobile: show Toggle button when UI hidden, hide Lock btn
+            -- Mobile: update toggle button text when UI hidden
             if MobileToggleBtn then
-                MobileToggleBtn.Button.Visible = true
-            end
-            if MobileLockBtn then
-                MobileLockBtn.Button.Visible = false
+                MobileToggleBtn:SetText('☰ UI')
             end
             if MobileOpenButton then
                 MobileOpenButton.Visible = true;
