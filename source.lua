@@ -30,17 +30,9 @@ if not table.move then
 end
 -- ─────────────────────────────────────────────────────────────────────────────
 
--- TOKAI logo: loaded once, cached into a decal via EditableImage or rbxthumb fallback
+-- TOKAI logo URL constant (function defined later, after FetchUrl is available)
 local TOKAI_LOGO_URL = 'https://raw.githubusercontent.com/longhazem/ui-library-/main/models/TOKAI_logo_no_bg.png'
-local _tokaiLogoContent = nil  -- cached raw PNG bytes (loaded on first window creation)
-local function _LoadTokaiLogo()
-    if _tokaiLogoContent then return _tokaiLogoContent end
-    pcall(function()
-        _tokaiLogoContent = FetchUrl and FetchUrl(TOKAI_LOGO_URL)
-            or (game:HttpGet and game:HttpGet(TOKAI_LOGO_URL, true))
-    end)
-    return _tokaiLogoContent
-end
+local _tokaiLogoContent = nil
 
 local RenderStepped = RunService.RenderStepped;
 local LocalPlayer = Players.LocalPlayer;
@@ -3623,6 +3615,24 @@ function Library:Notify(Text, Time)
         NotifyOuter:Destroy();
     end);
 end;
+
+local function _LoadTokaiLogo()
+    if _tokaiLogoContent then return _tokaiLogoContent end
+    pcall(function()
+        local ok, result
+        -- Try game:HttpGet (standard, works on Delta/Synapse Z/Wave/Volt/Potassium/OpiumWare)
+        ok, result = pcall(function() return game:HttpGet(TOKAI_LOGO_URL, true) end)
+        if ok and type(result) == 'string' and #result > 100 then
+            _tokaiLogoContent = result; return
+        end
+        -- Try game:HttpGetAsync (older builds)
+        ok, result = pcall(function() return game:HttpGetAsync(TOKAI_LOGO_URL) end)
+        if ok and type(result) == 'string' and #result > 100 then
+            _tokaiLogoContent = result; return
+        end
+    end)
+    return _tokaiLogoContent
+end
 
 function Library:CreateWindow(...)
     local Arguments = { ... }
